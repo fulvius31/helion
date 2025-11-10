@@ -108,6 +108,12 @@ class RunResult:
 KERNEL_MAPPINGS: dict[str, tuple[str, ...]] = {  # pyright: ignore[reportAssignmentType]
     # <tritonbench_op_name>: (<tritonbench_module_path>, <helion_kernel_module_path>, <helion_kernel_function_name>)
     "vector_add": ("tritonbench.operators.vector_add.operator", "examples.add", "add"),
+
+    "bf16_matmul": (
+        "tritonbench.operators.bf16_matmul.operator",
+        "examples.matmul_kernel_gen",
+        "matmul_tritonbench",
+    ),
     "addmm": (
         "tritonbench.operators.addmm.operator",
         "examples.matmul",
@@ -340,6 +346,17 @@ KERNEL_MAPPINGS: dict[str, tuple[str, ...]] = {  # pyright: ignore[reportAssignm
 
 
 KERNEL_METRIC_MAPPINGS: dict[str, dict[str, str]] = {
+    "bf16_matmul": {
+        "torch_matmul": "baseline",
+        "triton_matmul-speedup": "triton_speedup",
+        "triton_matmul-accuracy": "triton_accuracy",
+        "torch_compile_matmul-speedup": "torch_compile_speedup",
+        "torch_compile_matmul-accuracy": "torch_compile_accuracy",
+        "kernelllm_matmul-speedup": "kernelllm_speedup",
+        "kernelllm_matmul-accuracy": "kernelllm_accuracy",
+        "helion_matmul_tritonbench-speedup": "helion_speedup",
+        "helion_matmul_tritonbench-accuracy": "helion_accuracy",
+    },
     "vector_add": {
         "torch_add": "baseline",
         "triton_add-speedup": "triton_speedup",
