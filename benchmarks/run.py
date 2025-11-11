@@ -111,7 +111,7 @@ KERNEL_MAPPINGS: dict[str, tuple[str, ...]] = {  # pyright: ignore[reportAssignm
 
     "bf16_matmul": (
         "tritonbench.operators.bf16_matmul.operator",
-        "examples.matmul_kernel_gen",
+        "tritonbench.operators.bf16_matmul.matmul_helion",
         "matmul_tritonbench",
     ),
     "addmm": (
