@@ -109,6 +109,11 @@ KERNEL_MAPPINGS: dict[str, tuple[str, ...]] = {  # pyright: ignore[reportAssignm
     # <tritonbench_op_name>: (<tritonbench_module_path>, <helion_kernel_module_path>, <helion_kernel_function_name>)
     "vector_add": ("tritonbench.operators.vector_add.operator", "examples.add", "add"),
 
+    "bf16_layernorm": (
+        "tritonbench.operators.bf16_layernorm.operator",
+        "tritonbench.operators.bf16_layernorm.layernorm_helion",
+        "layer_norm_tritonbench",
+    ),
     "bf16_matmul": (
         "tritonbench.operators.bf16_matmul.operator",
         "tritonbench.operators.bf16_matmul.matmul_helion",
@@ -346,16 +351,42 @@ KERNEL_MAPPINGS: dict[str, tuple[str, ...]] = {  # pyright: ignore[reportAssignm
 
 
 KERNEL_METRIC_MAPPINGS: dict[str, dict[str, str]] = {
+    
+    "bf16_layernorm": {
+        "torch_layernorm": "baseline",
+        "triton_layernorm-speedup": "triton_speedup",
+        "triton_layernorm-accuracy": "triton_accuracy",
+        "triton_layernorm-tflops": "triton_tflops",
+        "torch_compile_layernorm-speedup": "torch_compile_speedup",
+        "torch_compile_layernorm-accuracy": "torch_compile_accuracy",
+        "torch_compile_layernorm-tflops": "torch_compile_tflops",
+        "kernelllm_layernorm-speedup": "kernelllm_speedup",
+        "kernelllm_layernorm-accuracy": "kernelllm_accuracy",
+        "kernelllm_layernorm-tflops": "kernelllm_tflops",
+        "mako_layernorm-speedup": "mako_speedup",
+        "mako_layernorm-accuracy": "mako_accuracy",
+        "mako_layernorm-tflops": "mako_tflops",
+        "helion_layernorm_tritonbench-speedup": "helion_speedup",
+        "helion_layernorm_tritonbench-accuracy": "helion_accuracy",
+        "helion_layernorm_tritonbench-tflops": "helion_tflops",
+    },
     "bf16_matmul": {
         "torch_matmul": "baseline",
         "triton_matmul-speedup": "triton_speedup",
         "triton_matmul-accuracy": "triton_accuracy",
+        "triton_matmul-tflops": "triton_tflops",
         "torch_compile_matmul-speedup": "torch_compile_speedup",
         "torch_compile_matmul-accuracy": "torch_compile_accuracy",
+        "torch_compile_matmul-tflops": "torch_compile_tflops",
         "kernelllm_matmul-speedup": "kernelllm_speedup",
         "kernelllm_matmul-accuracy": "kernelllm_accuracy",
+        "kernelllm_matmul-tflops": "kernelllm_tflops",
+        "mako_matmul-speedup": "mako_speedup",
+        "mako_matmul-accuracy": "mako_accuracy",
+        "mako_matmul-tflops": "mako_tflops",
         "helion_matmul_tritonbench-speedup": "helion_speedup",
         "helion_matmul_tritonbench-accuracy": "helion_accuracy",
+        "helion_matmul_tritonbench-tflops": "helion_tflops",
     },
     "vector_add": {
         "torch_add": "baseline",
