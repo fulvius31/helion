@@ -109,10 +109,10 @@ KERNEL_MAPPINGS: dict[str, tuple[str, ...]] = {  # pyright: ignore[reportAssignm
     # <tritonbench_op_name>: (<tritonbench_module_path>, <helion_kernel_module_path>, <helion_kernel_function_name>)
     "vector_add": ("tritonbench.operators.vector_add.operator", "examples.add", "add"),
 
-    "bf16_matmul_gelu": (
-        "tritonbench.operators.bf16_matmul_gelu.operator",
-        "tritonbench.operators.bf16_matmul_gelu.matmul_gelu_helion",
-        "matmul_gelu_tritonbench",
+    "bf16_gemm_gelu": (
+        "tritonbench.operators.bf16_gemm_gelu.operator",
+        "tritonbench.operators.bf16_gemm_gelu.gemm_gelu_helion",
+        "gemm_gelu_tritonbench",
     ),
     "bf16_layernorm": (
         "tritonbench.operators.bf16_layernorm.operator",
@@ -357,23 +357,23 @@ KERNEL_MAPPINGS: dict[str, tuple[str, ...]] = {  # pyright: ignore[reportAssignm
 
 KERNEL_METRIC_MAPPINGS: dict[str, dict[str, str]] = {
     
-    "bf16_matmul_gelu": {
-        "torch_matmul_gelu": "baseline",
-        "triton_matmul_gelu-speedup": "triton_speedup",
-        "triton_matmul_gelu-accuracy": "triton_accuracy",
-        "triton_matmul_gelu-tflops": "triton_tflops",
-        "torch_compile_matmul_gelu-speedup": "torch_compile_speedup",
-        "torch_compile_matmul_gelu-accuracy": "torch_compile_accuracy",
-        "torch_compile_matmul_gelu-tflops": "torch_compile_tflops",
-        "kernelllm_matmul_gelu-speedup": "kernelllm_speedup",
-        "kernelllm_matmul_gelu-accuracy": "kernelllm_accuracy",
-        "kernelllm_matmul_gelu-tflops": "kernelllm_tflops",
-        "mako_matmul_gelu-speedup": "mako_speedup",
-        "mako_matmul_gelu-accuracy": "mako_accuracy",
-        "mako_matmul_gelu-tflops": "mako_tflops",
-        "helion_matmul_gelu_tritonbench-speedup": "helion_speedup",
-        "helion_matmul_gelu_tritonbench-accuracy": "helion_accuracy",
-        "helion_matmul_gelu_tritonbench-tflops": "helion_tflops",
+    "bf16_gemm_gelu": {
+        "torch_gemm_gelu": "baseline",
+        "triton_gemm_gelu-speedup": "triton_speedup",
+        "triton_gemm_gelu-accuracy": "triton_accuracy",
+        "triton_gemm_gelu-tflops": "triton_tflops",
+        "torch_compile_gemm_gelu-speedup": "torch_compile_speedup",
+        "torch_compile_gemm_gelu-accuracy": "torch_compile_accuracy",
+        "torch_compile_gemm_gelu-tflops": "torch_compile_tflops",
+        "kernelllm_gemm_gelu-speedup": "kernelllm_speedup",
+        "kernelllm_gemm_gelu-accuracy": "kernelllm_accuracy",
+        "kernelllm_gemm_gelu-tflops": "kernelllm_tflops",
+        "mako_gemm_gelu-speedup": "mako_speedup",
+        "mako_gemm_gelu-accuracy": "mako_accuracy",
+        "mako_gemm_gelu-tflops": "mako_tflops",
+        "helion_gemm_gelu_tritonbench-speedup": "helion_speedup",
+        "helion_gemm_gelu_tritonbench-accuracy": "helion_accuracy",
+        "helion_gemm_gelu_tritonbench-tflops": "helion_tflops",
     },
     "bf16_layernorm": {
         "torch_layernorm": "baseline",
