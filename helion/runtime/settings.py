@@ -18,7 +18,8 @@ import torch
 from torch._environment import is_fbcode
 
 from .. import exc
-from .._compat import supports_amd_cdna_tunables
+from .._compat import is_hip
+from .._compat import supports_tf32_precision_on_amd
 from ..autotuner.effort_profile import AutotuneEffort
 from ..autotuner.effort_profile import get_effort_profile
 from .ref_mode import RefMode
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
         ) -> BaseAutotuner: ...
 
 
-BackendLiteral = Literal["triton", "pallas"]
+BackendLiteral = Literal["triton", "pallas", "cute"]
 DotPrecision = Literal["tf32", "tf32x3", "ieee"]
 PrecompileMode = Literal["spawn", "fork"] | None
 _TRUE_LITERALS = frozenset({"1", "true", "yes", "on"})
@@ -343,8 +344,8 @@ def _get_dot_precision() -> DotPrecision:
     Get the dot precision setting from TRITON_F32_DEFAULT environment variable.
     Defaults to 'tf32', 'ieee' if rocm and not CDNA.
     """
-    if torch.version.hip is not None:
-        default_precision = "tf32" if supports_amd_cdna_tunables() else "ieee"
+    if is_hip():
+        default_precision = "tf32" if supports_tf32_precision_on_amd() else "ieee"
     else:
         default_precision = "tf32"
 
@@ -359,7 +360,7 @@ def _get_backend() -> BackendLiteral:
     return _env_get_literal(
         "HELION_BACKEND",
         cast("BackendLiteral", "triton"),
-        mapping={"triton": "triton", "pallas": "pallas"},
+        mapping={"triton": "triton", "pallas": "pallas", "cute": "cute"},
     )
 
 
@@ -520,8 +521,8 @@ class Settings(_Settings):
 
     __slots__ = {
         "backend": (
-            "Code generation backend. One of 'triton' (default) or 'pallas' (JAX/Pallas). "
-            "Set HELION_BACKEND=pallas to use the Pallas backend."
+            "Code generation backend. One of 'triton' (default), 'pallas' (JAX/Pallas), "
+            "or 'cute' (CUTLASS CuTe DSL). Set HELION_BACKEND=<backend> to override."
         ),
         "ignore_warnings": (
             "Subtypes of exc.BaseWarning to ignore when compiling. "

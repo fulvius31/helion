@@ -41,7 +41,7 @@ def _get_symnode(debug_name: str) -> int:
     raise AssertionError("this should never be called")
 
 
-@_decorators.codegen(_get_symnode, "triton")
+@_decorators.codegen(_get_symnode, "common")
 def _(state: CodegenState) -> ast.AST:
     # pyrefly: ignore [missing-attribute]
     val = state.fx_node.meta["val"]
@@ -69,13 +69,34 @@ def _(state: CodegenState) -> ast.AST:
     )
 
 
+@_decorators.codegen(_get_symnode, "cute")
+def _(state: CodegenState) -> ast.AST:
+    # pyrefly: ignore [missing-attribute]
+    val = state.fx_node.meta["val"]
+    if isinstance(val, int):
+        return expr_from_string(str(val))
+
+    assert isinstance(val, (torch.SymInt, torch.SymFloat, torch.SymBool)), val
+    sym_expr = val._sympy_()
+    origin_info = HostFunction.current().expr_to_origin.get(sym_expr)
+    if origin_info is not None and isinstance(origin_info.origin, BlockSizeOrigin):
+        block_id = origin_info.origin.block_id
+        return expr_from_string(state.codegen.index_var(block_id))
+    return state.codegen.lift_symnode(
+        expr_from_string(state.sympy_expr(sym_expr)),
+        sym_expr,
+        dce=True,
+        prefix="symnode",
+    )
+
+
 @_decorators.api()
 def _host_tensor(debug_name: str) -> torch.Tensor:
     """Source of a tensor that was allocated on the host and must be passed to the kernel as an arg."""
     raise AssertionError("this should never be called")
 
 
-@_decorators.codegen(_host_tensor, "triton")
+@_decorators.codegen(_host_tensor, "common")
 def _(state: CodegenState) -> ast.AST:
     return expr_from_string("_host_tensor")  # should be unused
 
@@ -108,7 +129,7 @@ def _for_loop(
     raise AssertionError("this should never be called")
 
 
-@_decorators.codegen(_for_loop, "triton")
+@_decorators.codegen(_for_loop, "common")
 def _(state: CodegenState) -> None:
     # pyrefly: ignore [bad-index]
     return HostFunction.current().device_ir.graphs[state.proxy_arg(0)].codegen(state)
@@ -126,7 +147,7 @@ def _while_loop(
     raise AssertionError("this should never be called")
 
 
-@_decorators.codegen(_while_loop, "triton")
+@_decorators.codegen(_while_loop, "common")
 def _(state: CodegenState) -> None:
     # pyrefly: ignore [bad-index]
     return HostFunction.current().device_ir.graphs[state.proxy_arg(1)].codegen(state)
@@ -139,7 +160,7 @@ def _if(test: object, graph_id: int, args: list[object]) -> list[object]:
     raise AssertionError("this should never be called")
 
 
-@_decorators.codegen(_if, "triton")
+@_decorators.codegen(_if, "common")
 def _(state: CodegenState) -> None:
     # pyrefly: ignore [bad-index]
     return HostFunction.current().device_ir.graphs[state.proxy_arg(1)].codegen(state)
@@ -167,7 +188,7 @@ def _(lhs: object, rhs: object) -> object:
     return torch.empty_like(lhs)
 
 
-@_decorators.codegen(_phi, "triton")
+@_decorators.codegen(_phi, "common")
 def _(state: CodegenState) -> ast.Name:
     lhs = state.ast_arg(0)
     assert isinstance(lhs, ast.Name), lhs
@@ -208,7 +229,7 @@ def _and(left: object, right: object) -> object:
     raise NotInsideKernel
 
 
-@_decorators.codegen(_and, "triton")
+@_decorators.codegen(_and, "common")
 def _(state: CodegenState) -> None:
     # pyrefly: ignore [bad-return]
     return expr_from_string(
@@ -262,7 +283,7 @@ def _(left: object, right: object) -> object:
         return env.shape_env.create_unbacked_symbool()
 
 
-@_decorators.codegen(_or, "triton")
+@_decorators.codegen(_or, "common")
 def _(state: CodegenState) -> None:
     # pyrefly: ignore [bad-return]
     return expr_from_string(
@@ -288,7 +309,7 @@ def _(left: object) -> object:
         return env.shape_env.create_unbacked_symbool()
 
 
-@_decorators.codegen(_not, "triton")
+@_decorators.codegen(_not, "common")
 def _(state: CodegenState) -> ast.AST:
     return expr_from_string(
         "not {lhs}",
@@ -384,7 +405,7 @@ def _(value: _T) -> _T:
     raise NotImplementedError(f"Unsupported type for _new_var: {type(value)}")
 
 
-@_decorators.codegen(_new_var, "triton")
+@_decorators.codegen(_new_var, "common")
 def _(state: CodegenState) -> ast.AST:
     value = state.ast_arg(0)
     assert isinstance(value, ast.AST)
