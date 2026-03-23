@@ -8,7 +8,6 @@ import datetime
 import functools
 import inspect
 from itertools import count
-from itertools import starmap
 import logging
 import math
 from math import inf
@@ -856,16 +855,21 @@ class BaseSearch(BaseAutotuner):
         """
         fns: list[Callable[..., object]] = []
         futures: list[PrecompileFuture] | None = None
-        for config in configs:
-            fn = self.kernel.compile_config(config, allow_print=False)
-            fns.append(fn)
-        if self.settings.autotune_precompile:
-            futures = list(
-                starmap(
-                    self.create_precompile_future,
-                    zip(configs, fns, strict=True),
-                )
-            )
+        precompile = self.settings.autotune_precompile
+        if precompile:
+            futures = []
+        try:
+            for config in configs:
+                fn = self.kernel.compile_config(config, allow_print=False)
+                fns.append(fn)
+                if futures is not None:
+                    futures.append(self.create_precompile_future(config, fn))
+                    PrecompileFuture._start_pending(futures, self._jobs)
+        except BaseException:
+            if futures:
+                PrecompileFuture._cancel_all(futures)
+            raise
+        if futures is not None:
             precompile_desc = (
                 f"{desc} precompiling" if self.settings.autotune_progress_bar else None
             )
@@ -1679,6 +1683,24 @@ class PrecompileFuture:
             return
         self.start_time = time.time()
         self.process.start()
+
+    @staticmethod
+    def _start_pending(futures: list[PrecompileFuture], cap: int) -> None:
+        """Start queued precompile processes up to the concurrency cap.
+
+        Single-pass: counts alive processes and starts queued ones in one
+        traversal.  Processes that have already exited free their slot
+        automatically (is_alive() returns False).
+        """
+        slots = cap
+        for f in futures:
+            if f.started:
+                if f.is_alive():
+                    slots -= 1
+            elif slots > 0 and f.ok is None and f.process is not None:
+                f.start()
+                if f.is_alive():
+                    slots -= 1
 
     @staticmethod
     def skip(search: BaseSearch, config: Config, ok: bool) -> PrecompileFuture:
