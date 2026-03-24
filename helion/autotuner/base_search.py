@@ -864,7 +864,8 @@ class BaseSearch(BaseAutotuner):
                 fns.append(fn)
                 if futures is not None:
                     futures.append(self.create_precompile_future(config, fn))
-                    PrecompileFuture._launch_pending(futures, self._jobs)
+                    if self.settings.autotune_effort == "full":
+                        PrecompileFuture._launch_pending(futures, self._jobs)
         except BaseException:
             if futures:
                 PrecompileFuture._cancel_all(futures)
