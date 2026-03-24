@@ -864,12 +864,13 @@ class BaseSearch(BaseAutotuner):
                 fns.append(fn)
                 if futures is not None:
                     futures.append(self.create_precompile_future(config, fn))
-                    PrecompileFuture._start_pending(futures, self._jobs)
+                    PrecompileFuture._launch_pending(futures, self._jobs)
         except BaseException:
             if futures:
                 PrecompileFuture._cancel_all(futures)
             raise
         if futures is not None:
+            PrecompileFuture._activate_launched(futures)
             precompile_desc = (
                 f"{desc} precompiling" if self.settings.autotune_progress_bar else None
             )
@@ -1639,8 +1640,10 @@ class PrecompileFuture:
     config: Config
     process: mp.Process | None
     timeout: float
-    # Set when the process is actually started. For queued futures this is None.
+    # Set when the timeout clock begins (activation time).
     start_time: float | None = None
+    # Set when the OS process was actually started (for compile-time metrics).
+    launch_time: float | None = None
     end_time: float | None = None
     ok: bool | None = None
     result_path: str | None = None
@@ -1651,12 +1654,13 @@ class PrecompileFuture:
 
     @property
     def elapsed(self) -> float:
-        """Return the elapsed time since the start of the precompilation."""
-        if self.start_time is None:
+        """Return observed compile elapsed time since the process launched."""
+        ref = self.launch_time if self.launch_time is not None else self.start_time
+        if ref is None:
             return 0.0
         if self.end_time is not None:
-            return self.end_time - self.start_time
-        return time.time() - self.start_time
+            return self.end_time - ref
+        return time.time() - ref
 
     def seconds_left(self) -> float:
         """Return the number of seconds left before the timeout."""
@@ -1673,34 +1677,64 @@ class PrecompileFuture:
         return p.is_alive()
 
     @property
+    def launched(self) -> bool:
+        """Whether the underlying OS process has been started."""
+        return self.process is not None and self.process.pid is not None
+
+    @property
     def started(self) -> bool:
-        """Whether the process has been started."""
+        """Whether the timeout clock has been activated."""
         return self.start_time is not None
 
+    def launch(self) -> None:
+        """Start the OS process without beginning the timeout clock.
+
+        Records launch_time for compile-time metrics.  The timeout clock
+        (start_time) is set later by _activate_launched before wait_for_all.
+        """
+        if self.process is None or self.launched:
+            return
+        self.process.start()
+        self.launch_time = time.time()
+
     def start(self) -> None:
-        """Start the underlying process and set the timer if not already started."""
+        """Begin the timeout clock and launch the process if not already launched."""
         if self.process is None or self.started:
             return
+        if not self.launched:
+            self.launch()
         self.start_time = time.time()
-        self.process.start()
 
     @staticmethod
-    def _start_pending(futures: list[PrecompileFuture], cap: int) -> None:
-        """Start queued precompile processes up to the concurrency cap.
+    def _launch_pending(futures: list[PrecompileFuture], cap: int) -> None:
+        """Launch queued precompile processes up to the concurrency cap.
 
-        Single-pass: counts alive processes and starts queued ones in one
-        traversal.  Processes that have already exited free their slot
-        automatically (is_alive() returns False).
+        Launches without starting timeout clocks.  Short-circuits once
+        cap alive processes are found.
         """
         slots = cap
         for f in futures:
-            if f.started:
+            if slots <= 0:
+                break
+            if f.launched:
                 if f.is_alive():
                     slots -= 1
-            elif slots > 0 and f.ok is None and f.process is not None:
-                f.start()
+            elif f.ok is None and f.process is not None:
+                f.launch()
                 if f.is_alive():
                     slots -= 1
+
+    @staticmethod
+    def _activate_launched(futures: list[PrecompileFuture]) -> None:
+        """Begin timeout clocks for all pre-launched futures.
+
+        Called once before wait_for_all so that _wait_for_all_step sees
+        all launched futures as 'started'.
+        """
+        now = time.time()
+        for f in futures:
+            if f.launched and f.start_time is None:
+                f.start_time = now
 
     @staticmethod
     def skip(search: BaseSearch, config: Config, ok: bool) -> PrecompileFuture:
@@ -1825,7 +1859,7 @@ class PrecompileFuture:
     def _kill_without_wait(self) -> None:
         """Issue a hard kill to the underlying process without waiting for exit."""
         process = self.process
-        if process is None or not self.started:
+        if process is None or not self.launched:
             return
         if process.is_alive():
             with contextlib.suppress(Exception):
@@ -1836,7 +1870,7 @@ class PrecompileFuture:
         self.end_time = time.time()
         process = self.process
         if process is not None:
-            if self.started:
+            if self.launched:
                 with contextlib.suppress(Exception):
                     if process.is_alive():
                         process.kill()
