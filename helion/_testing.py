@@ -228,7 +228,9 @@ def _init_tpu_device() -> bool:
 
 
 # Determine DEVICE without calling functions that initialize CUDA.
-if _get_backend() == "pallas" and is_pallas_interpret():
+if _get_backend() == "openmp" or (
+    _get_backend() == "pallas" and is_pallas_interpret()
+):
     DEVICE = torch.device("cpu")
 elif _get_backend() == "pallas":
     _init_tpu_device()
@@ -414,6 +416,14 @@ def skipUnlessPallas(reason: str) -> Callable[[Callable], Callable]:
             return False
 
     return skipIfFn(lambda: not _has_tpu_pallas(), reason)
+
+
+def skipUnlessOpenMP(reason: str = "") -> Callable[[Callable], Callable]:
+    """Skip test unless the OpenMP CPU backend is active."""
+    return skipIfFn(
+        lambda: _get_backend() != "openmp",
+        reason or "Not running with OpenMP backend",
+    )
 
 
 def skipIfA10G(reason: str) -> Callable[[Callable], Callable]:

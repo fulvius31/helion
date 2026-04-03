@@ -599,14 +599,14 @@ class BoundKernel(_AutotunableKernel, Generic[_R]):
             os.environ["TRITON_CACHE_DIR"] = triton_dir
             log.debug("Set TRITON_CACHE_DIR=%s", triton_dir)
         try:
-            triton_code = self.to_triton_code(
+            device_code = self.to_triton_code(
                 config, emit_repro_caller=self.settings.print_output_code
             )
             with measure("BoundKernel.PyCodeCache.load"):
-                module = PyCodeCache.load(triton_code)
+                module = PyCodeCache.load(device_code)
         except Exception:
             log.warning(
-                "Helion compiler triton codegen error for %s",
+                "Helion compiler codegen error for %s",
                 self.format_kernel_decorator(config, self.settings),
                 exc_info=True,
             )
@@ -621,9 +621,9 @@ class BoundKernel(_AutotunableKernel, Generic[_R]):
             if (
                 not dist.is_initialized() or dist.get_rank() == 1
             ) and self.settings.print_output_code:
-                log.info("Output code: \n%s", triton_code)
+                log.info("Output code: \n%s", device_code)
                 print(f"# Output code written to: {module.__file__}", file=sys.stderr)
-                print(triton_code, file=sys.stderr)
+                print(device_code, file=sys.stderr)
         rv = getattr(module, self.kernel.name)
         self._compile_cache[config] = rv
         self._cache_path_map[config] = module.__file__

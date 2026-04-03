@@ -683,6 +683,11 @@ class BlockSizeTileStrategy(TileStrategy):
         return reserved_reduction_axes + active_non_reduction_axes
 
     def select_pid_strategy(self) -> ProgramIDs:
+        env = CompileEnvironment.current()
+        if env.backend.name == "openmp":
+            from .program_id import ForLoopProgramIDs
+
+            return ForLoopProgramIDs()
         pid_type = self.fn.config.pid_type
         if pid_type == "xyz":
             assert 1 < len(self.block_ids) <= 3

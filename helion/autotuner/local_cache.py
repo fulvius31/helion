@@ -152,6 +152,9 @@ class LocalAutotuneCache(AutotuneCacheBase):
         elif dev.type == "cpu" and self.kernel.kernel.settings.backend == "pallas":
             hardware = "pallas_interpret"
             runtime_name = "interpret"
+        elif dev.type == "cpu":
+            hardware = "cpu"
+            runtime_name = "openmp"
 
         assert hardware is not None and runtime_name is not None
         config_spec_hash = self.kernel.config_spec.structural_fingerprint_hash()

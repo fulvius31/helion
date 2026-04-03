@@ -244,6 +244,45 @@ def _pallas_ds_expr(state: CodegenState, block_id: int) -> str:
     return f"pl.ds({offset}, {block_size})"
 
 
+def _openmp_index_str(
+    state: CodegenState,
+    subscript: list[object] | tuple[object, ...],
+    tensor: torch.Tensor,
+) -> str:
+    """Build a Python slice index string for CPU tensor access.
+
+    For tiled dimensions, generates ``offset:offset + block_size`` slices.
+    Python slice semantics auto-clamp at tensor boundaries, so no explicit
+    mask or ``min()`` is needed.
+    """
+    env = CompileEnvironment.current()
+
+    if not subscript:
+        return "..."
+
+    parts: list[str] = []
+    tensor_dim = 0
+    for idx in subscript:
+        if idx is None:
+            parts.append("None")
+            continue
+        block_id = _resolve_block_id(env, idx, tensor, tensor_dim)
+        if block_id is not None:
+            offset = state.codegen.offset_var(block_id)
+            block_size = state.device_function.block_size_var(block_id)
+            if block_size is None:
+                parts.append(":")
+            else:
+                parts.append(f"{offset}:{offset} + {block_size}")
+        elif isinstance(idx, int):
+            parts.append(str(idx))
+        else:
+            parts.append(":")
+        tensor_dim += 1
+
+    return ", ".join(parts)
+
+
 def _pallas_vmem_name(state: CodegenState, name: str) -> str:
     """Remap a tensor name to its VMEM ref name when inside emit_pipeline or fori_loop."""
     from .._compiler.tile_strategy import EmitPipelineLoopState
@@ -275,6 +314,37 @@ def _(state: CodegenState) -> None:
     state.codegen.add_statement(
         statement_from_string(f"{name}[{index_str}] = {{value}}", value=value)
     )
+
+
+@_decorators.codegen(store, "openmp")
+def _(state: CodegenState) -> None:
+    tensor = state.proxy_arg(0)
+    subscript = state.proxy_arg(1)
+    assert isinstance(subscript, (list, tuple))
+    value = state.ast_arg(2)
+    extra_mask = state.ast_args[3] if len(state.ast_args) > 3 else None
+    assert isinstance(extra_mask, (type(None), ast.AST))
+    if isinstance(tensor, tuple):
+        raise exc.BackendUnsupported("openmp", "StackTensor store")
+    assert isinstance(tensor, torch.Tensor)
+    name = state.device_function.tensor_arg(tensor).name
+    device_fn = state.device_function
+    device_fn.device_store_index += 1
+    device_fn.device_memory_op_index += 1
+    index_str = _openmp_index_str(state, subscript, tensor)
+    if extra_mask is not None:
+        # Conditionally store: only write where mask is True
+        state.codegen.add_statement(
+            statement_from_string(
+                f"{name}[{index_str}] = torch.where({{mask}}, {{value}}, {name}[{index_str}])",
+                mask=extra_mask,
+                value=value,
+            )
+        )
+    else:
+        state.codegen.add_statement(
+            statement_from_string(f"{name}[{index_str}] = {{value}}", value=value)
+        )
 
 
 def _matching_block_ids(env: CompileEnvironment, size: object) -> list[int]:
@@ -1226,6 +1296,31 @@ def _(state: CodegenState) -> ast.AST:
     for dim in none_dims:
         result = expr_from_string(
             f"jnp.expand_dims({{result}}, axis={dim})", result=result
+        )
+    return result
+
+
+@_decorators.codegen(load, "openmp")
+def _(state: CodegenState) -> ast.AST:
+    tensor = state.proxy_arg(0)
+    subscript = state.proxy_arg(1)
+    if isinstance(tensor, tuple):
+        raise exc.BackendUnsupported("openmp", "StackTensor load")
+    assert isinstance(tensor, torch.Tensor)
+    assert isinstance(subscript, (list, tuple))
+    extra_mask = state.ast_args[2]
+    assert isinstance(extra_mask, (type(None), ast.AST))
+    name = state.device_function.tensor_arg(tensor).name
+    device_fn = state.device_function
+    device_fn.device_load_index += 1
+    device_fn.device_memory_op_index += 1
+    index_str = _openmp_index_str(state, subscript, tensor)
+    result = expr_from_string(f"{name}[{index_str}]")
+    if extra_mask is not None:
+        result = expr_from_string(
+            "torch.where({mask}, {val}, torch.zeros_like({val}))",
+            mask=extra_mask,
+            val=result,
         )
     return result
 

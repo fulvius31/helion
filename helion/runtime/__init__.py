@@ -1175,3 +1175,24 @@ def default_metal_launcher(
     dispatch_fn = getattr(lib, kernel_name)
     total_threads = grid[0] * _block_size
     dispatch_fn(*tensor_args, threads=total_threads, group_size=_block_size)
+
+
+def default_cpu_launcher(
+    cpu_kernel: object,
+    grid: tuple[int, ...],
+    *args: object,
+    **kwargs: object,
+) -> None:
+    """Default launcher for OpenMP CPU kernels.
+
+    The tile loop is inside the kernel function body (unlike GPU backends
+    where the grid dispatches parallel blocks), so the launcher simply
+    calls the function directly with its arguments.
+    """
+    kwargs.pop("num_warps", None)
+    kwargs.pop("num_stages", None)
+    if kwargs:
+        raise exc.BackendUnsupported(
+            "openmp", f"unexpected launcher kwargs: {sorted(kwargs)}"
+        )
+    cpu_kernel(*args)  # type: ignore[operator]

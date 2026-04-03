@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import ast
 import functools
+import math
 import operator
 import re
 from typing import TYPE_CHECKING
@@ -2745,3 +2746,373 @@ class MetalBackend(Backend):
 
         dims = tuple(DeviceFunction.current().codegen.max_thread_block_dims)
         return [f"_block_dims=({dims[0]}, {dims[1]}, {dims[2]})"]
+
+
+def _make_openmp_op_overrides() -> InductorOpOverrides:
+    from torch._inductor.codegen.common import OpOverrides
+
+    class _Overrides(  # pyrefly: ignore[bad-param-name-override]
+        OpOverrides,  # type: ignore[misc]
+    ):
+        """Maps element-wise ops to ``torch.*`` expressions."""
+
+        @staticmethod
+        def sin(x0: str) -> str:
+            return f"torch.sin({x0})"
+
+        @staticmethod
+        def cos(x0: str) -> str:
+            return f"torch.cos({x0})"
+
+        @staticmethod
+        def tan(x0: str) -> str:
+            return f"torch.tan({x0})"
+
+        @staticmethod
+        def tanh(x0: str) -> str:
+            return f"torch.tanh({x0})"
+
+        @staticmethod
+        def exp(x0: str) -> str:
+            return f"torch.exp({x0})"
+
+        @staticmethod
+        def exp2(x0: str) -> str:
+            return f"torch.exp2({x0})"
+
+        @staticmethod
+        def expm1(x0: str) -> str:
+            return f"torch.expm1({x0})"
+
+        @staticmethod
+        def log(x0: str) -> str:
+            return f"torch.log({x0})"
+
+        @staticmethod
+        def log10(x0: str) -> str:
+            return f"torch.log10({x0})"
+
+        @staticmethod
+        def log2(x0: str) -> str:
+            return f"torch.log2({x0})"
+
+        @staticmethod
+        def log1p(x0: str) -> str:
+            return f"torch.log1p({x0})"
+
+        @staticmethod
+        def sqrt(x0: str) -> str:
+            return f"torch.sqrt({x0})"
+
+        @staticmethod
+        def rsqrt(x0: str) -> str:
+            return f"torch.rsqrt({x0})"
+
+        @staticmethod
+        def abs(x0: str) -> str:
+            return f"torch.abs({x0})"
+
+        @staticmethod
+        def neg(x0: str) -> str:
+            return f"(-{x0})"
+
+        @staticmethod
+        def floor(x0: str) -> str:
+            return f"torch.floor({x0})"
+
+        @staticmethod
+        def ceil(x0: str) -> str:
+            return f"torch.ceil({x0})"
+
+        @staticmethod
+        def trunc(x0: str) -> str:
+            return f"torch.trunc({x0})"
+
+        @staticmethod
+        def sigmoid(x0: str) -> str:
+            return f"torch.sigmoid({x0})"
+
+        @staticmethod
+        def relu(x0: str) -> str:
+            return f"torch.relu({x0})"
+
+        @staticmethod
+        def pow(a0: str, b0: str) -> str:
+            return f"torch.pow({a0}, {b0})"
+
+        @staticmethod
+        def maximum(a0: str, b0: str) -> str:
+            # Use torch.maximum with torch.as_tensor to handle scalar args
+            return f"torch.maximum(torch.as_tensor({a0}), torch.as_tensor({b0}))"
+
+        @staticmethod
+        def minimum(a0: str, b0: str) -> str:
+            return f"torch.minimum(torch.as_tensor({a0}), torch.as_tensor({b0}))"
+
+        @staticmethod
+        def where(a0: str, b0: str, c0: str) -> str:
+            return f"torch.where({a0}, {b0}, {c0})"
+
+        @staticmethod
+        def masked(mask: str, body: Callable[[], str], other: float) -> str:
+            result = body()
+            if isinstance(other, float):
+                if math.isnan(other):
+                    other_str = "float('nan')"
+                elif math.isinf(other):
+                    other_str = "float('inf')" if other > 0 else "float('-inf')"
+                else:
+                    other_str = repr(other)
+            else:
+                other_str = repr(other)
+            return f"torch.where({mask}, {result}, {other_str})"
+
+        @staticmethod
+        def to_dtype(
+            x0: str,
+            dtype: torch.dtype,
+            src_dtype: torch.dtype | None = None,
+            use_compute_types: bool = True,
+        ) -> str:
+            return f"torch.as_tensor({x0}).to({dtype})"
+
+        @staticmethod
+        def to_dtype_bitcast(
+            x0: str, dtype: torch.dtype, src_dtype: torch.dtype
+        ) -> str:
+            return f"({x0}).view({dtype})"
+
+    return _Overrides()
+
+
+class OpenMPBackend(Backend):
+    """OpenMP CPU backend — generates plain Python with torch ops.
+
+    All expression methods return valid Python that passes through
+    ast.parse() / expr_from_string().  The generated kernel is a
+    Python function with for-loops over tiles and torch tensor
+    slicing for memory access.
+    """
+
+    _DTYPE_TO_TORCH: ClassVar[dict[torch.dtype, str]] = {
+        torch.float16: "torch.float16",
+        torch.bfloat16: "torch.bfloat16",
+        torch.float32: "torch.float32",
+        torch.float64: "torch.float64",
+        torch.int8: "torch.int8",
+        torch.int16: "torch.int16",
+        torch.int32: "torch.int32",
+        torch.int64: "torch.int64",
+        torch.uint8: "torch.uint8",
+        torch.bool: "torch.bool",
+    }
+
+    _ACC_TYPE: ClassVar[dict[torch.dtype, str]] = {
+        torch.float16: "torch.float32",
+        torch.bfloat16: "torch.float32",
+        torch.float32: "torch.float32",
+        torch.float64: "torch.float64",
+        torch.int8: "torch.int32",
+        torch.int16: "torch.int32",
+        torch.int32: "torch.int32",
+        torch.int64: "torch.int64",
+        torch.uint8: "torch.int32",
+        torch.bool: "torch.int32",
+    }
+
+    _SUPPORTED_CONFIG_KEYS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "block_sizes",
+            "loop_orders",
+            "reduction_loops",
+        }
+    )
+
+    # --- Identity ---
+
+    @property
+    def name(self) -> str:
+        return "openmp"
+
+    # --- Type system ---
+
+    def dtype_str(self, dtype: torch.dtype) -> str:
+        if dtype not in self._DTYPE_TO_TORCH:
+            raise exc.BackendUnsupported(self.name, f"dtype: {dtype}")
+        return self._DTYPE_TO_TORCH[dtype]
+
+    def acc_type(self, dtype: torch.dtype) -> str:
+        if dtype not in self._ACC_TYPE:
+            raise exc.BackendUnsupported(self.name, f"acc_type for: {dtype}")
+        return self._ACC_TYPE[dtype]
+
+    def index_type_str(self, index_dtype: torch.dtype) -> str:
+        return "int"
+
+    # --- Function structure ---
+
+    @property
+    def function_decorator(self) -> str:
+        return ""
+
+    @property
+    def constexpr_type(self) -> str:
+        return "int"
+
+    def inline_constexpr(self, name: str, value: str) -> str:
+        return f"{name} = {value}"
+
+    @property
+    def default_launcher_name(self) -> str:
+        return "_default_cpu_launcher"
+
+    @property
+    def library_imports(self) -> dict[str, str]:
+        return {
+            "math": "import math",
+            "torch": "import torch",
+            "helion": "import helion",
+            "hl": "import helion.language as hl",
+            "_default_cpu_launcher": (
+                "from helion.runtime import default_cpu_launcher"
+                " as _default_cpu_launcher"
+            ),
+        }
+
+    # --- Expressions (all valid Python) ---
+
+    def cast_expr(self, expr_str: str, dtype_str: str) -> str:
+        return f"torch.as_tensor({expr_str}).to({dtype_str})"
+
+    def program_id_expr(self, dim: int, *, index_dtype: str) -> str:
+        return f"_pid_{dim}"
+
+    def arange_expr(
+        self,
+        offsets_var: str,
+        lid: str,
+        block_size_var: str,
+        dtype: str,
+        *,
+        axis: int = 0,
+    ) -> str:
+        return f"{offsets_var} = {lid} * {block_size_var}"
+
+    def grid_index_expr(
+        self, offset_var: str, block_size_var: str, dtype: str, *, axis: int
+    ) -> str:
+        return f"{offset_var}"
+
+    def loop_index_expr(
+        self, offset_var: str, block_size_var: str, dtype: str, *, axis: int
+    ) -> str:
+        return f"{offset_var}"
+
+    def scalar_load_expr(self, tensor_name: str) -> str:
+        return f"{tensor_name}.item()"
+
+    def where_expr(self, mask: str, true_val: str, false_val: str) -> str:
+        return f"torch.where({mask}, {true_val}, {false_val})"
+
+    def minimum_expr(self, a: str, b: str) -> str:
+        return f"torch.minimum(torch.as_tensor({a}), torch.as_tensor({b}))"
+
+    def zeros_expr(self, shape: str, dtype: str) -> str:
+        return f"torch.zeros({shape}, dtype={dtype}, device='cpu')"
+
+    def full_expr(
+        self, shape_dims: list[str], value_expr: str, dtype: torch.dtype
+    ) -> str:
+        shape = ", ".join(shape_dims)
+        return (
+            f"torch.full([{shape}], {value_expr},"
+            f" dtype={self.dtype_str(dtype)}, device='cpu')"
+        )
+
+    def reshape_expr(self, expr: str, shape: str) -> str:
+        return f"({expr}).reshape({shape})"
+
+    def broadcast_to_expr(self, expr: str, shape: str) -> str:
+        return f"({expr}).expand({shape})"
+
+    def reduction_expr(
+        self,
+        input_name: str,
+        reduction_type: str,
+        dim: int,
+        *,
+        block_size_var: str | None = None,
+        threads_in_group: int | None = None,
+    ) -> str:
+        if reduction_type == "sum":
+            return f"torch.sum({input_name}, dim={dim})"
+        if reduction_type == "max":
+            return f"torch.amax({input_name}, dim={dim})"
+        if reduction_type == "min":
+            return f"torch.amin({input_name}, dim={dim})"
+        if reduction_type == "prod":
+            return f"torch.prod({input_name}, dim={dim})"
+        raise exc.BackendUnsupported(self.name, f"reduction type {reduction_type!r}")
+
+    def next_power_of_2_host_expr(self, expr: str) -> str:
+        return f"(1 << max(0, int({expr}) - 1).bit_length())"
+
+    def reduction_index_expr(
+        self, block_size_var: str, dtype: str, block_idx: int, *, axis: int
+    ) -> str:
+        return f"torch.arange(0, {block_size_var}, dtype={dtype}, device='cpu')"
+
+    def reduction_index_zero_expr(self, dtype: str) -> str:
+        return f"torch.zeros([0], dtype={dtype}, device='cpu')"
+
+    def arange_index_expr(self, block_size_var: str, dtype: str) -> str:
+        return f"torch.arange(0, {block_size_var}, dtype={dtype}, device='cpu')"
+
+    # --- Config ---
+
+    def range_str(
+        self,
+        begin: str | None,
+        end: str,
+        step: str | None,
+    ) -> str | None:
+        range_args = []
+        if begin is not None:
+            range_args.append(begin)
+        range_args.append(end)
+        if step is not None and step != "1":
+            range_args.append(step)
+        return f"range({', '.join(range_args)})"
+
+    def supports_config_key(self, key: str) -> bool:
+        return key in self._SUPPORTED_CONFIG_KEYS
+
+    def supports_precompile(self) -> bool:
+        return False
+
+    def supports_block_ptr_indexing(self) -> bool:
+        return False
+
+    def force_tile_mask(self) -> bool:
+        # CPU slicing auto-clamps at tensor boundaries, so explicit masks
+        # are unnecessary.  Returning False avoids generating mask variables
+        # that would fail at runtime (scalar bool vs tensor).
+        return False
+
+    # --- Benchmarking ---
+
+    def get_do_bench(self) -> Callable[..., float | tuple[float, ...]]:
+        from ..autotuner.benchmarking import do_bench_generic
+
+        return do_bench_generic
+
+    def get_interleaved_bench(self) -> Callable[..., list[float]]:
+        from ..autotuner.benchmarking import interleaved_bench_generic
+
+        return interleaved_bench_generic
+
+    def classify_autotune_exception(self, err: BaseException) -> str | None:
+        return "debug"
+
+    def inductor_op_overrides(self) -> InductorOpOverrides:
+        return _make_openmp_op_overrides()

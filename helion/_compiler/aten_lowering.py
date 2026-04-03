@@ -538,10 +538,37 @@ def codegen_view_pallas(ctx: LoweringContext, node: Node) -> object:
     return expr_from_string(f"jnp.reshape({{tensor}}, {shape_str})", tensor=tensor)
 
 
+@squeeze_lowering.register_codegen("openmp")
+@view_lowering.register_codegen("openmp")
+@reshape_lowering.register_codegen("openmp")
+def codegen_view_openmp(ctx: LoweringContext, node: Node) -> object:
+    tensor = map_arg(node.args[0], lambda arg: _env_arg(ctx, arg))
+    assert isinstance(tensor, ast.AST)
+    shape_str = ctx.cg.device_function.tile_strategy.shape_str(
+        [*node.meta["val"].size()]
+    )
+    return expr_from_string(
+        f"{{tensor}}.reshape({shape_str})", tensor=tensor
+    )
+
+
 view_dtype_lowering = register_lowering(
     torch.ops.aten.view.dtype,
     masked_value_fn=passthrough_masked_value,
 )
+
+
+@view_dtype_lowering.register_codegen("openmp")
+def codegen_view_dtype_openmp(ctx: LoweringContext, node: Node) -> object:
+    """Generate .view(dtype) for dtype reinterpretation on CPU."""
+    tensor = map_arg(node.args[0], lambda arg: _env_arg(ctx, arg))
+    assert isinstance(tensor, ast.AST)
+    target_dtype = node.args[1]
+    assert isinstance(target_dtype, torch.dtype)
+    return expr_from_string(
+        f"{{tensor}}.view({target_dtype})",
+        tensor=tensor,
+    )
 
 
 @view_dtype_lowering.register_codegen("triton")
@@ -606,6 +633,18 @@ def codegen_permute_pallas(ctx: LoweringContext, node: Node) -> object:
     dims = [*dims]
     return expr_from_string(
         f"jnp.transpose({{tensor}}, {dims!r})",
+        tensor=tensor,
+    )
+
+
+@permute_lowering.register_codegen("openmp")
+def codegen_permute_openmp(ctx: LoweringContext, node: Node) -> object:
+    tensor, dims = map_arg(node.args, lambda arg: _env_arg(ctx, arg))
+    assert isinstance(tensor, ast.AST)
+    # pyrefly: ignore [not-iterable]
+    dims = [*dims]
+    return expr_from_string(
+        f"{{tensor}}.permute({dims!r})",
         tensor=tensor,
     )
 
@@ -756,6 +795,29 @@ def codegen_expand_cute(ctx: LoweringContext, node: Node) -> object:
     return tensor
 
 
+@expand_lowering.register_codegen("openmp")
+def codegen_expand_openmp(ctx: LoweringContext, node: Node) -> object:
+    tensor, _ = map_arg(node.args, lambda arg: _env_arg(ctx, arg))
+    assert isinstance(tensor, ast.AST)
+    val = node.meta["val"]
+    assert isinstance(val, torch.Tensor)
+    shape = [*val.size()]
+    # pyrefly: ignore [missing-attribute]
+    if node.args[0].meta["val"].ndim != len(shape):
+        broadcasting = [":"] * len(shape)
+        # pyrefly: ignore [missing-attribute]
+        for i in range(len(shape) - node.args[0].meta["val"].ndim):
+            broadcasting[i] = "None"
+        tensor = expr_from_string(
+            f"{{tensor}}[{', '.join(broadcasting)}]", tensor=tensor
+        )
+    shape_str = ctx.cg.device_function.tile_strategy.shape_str(shape)
+    return expr_from_string(
+        f"{{tensor}}.expand({shape_str})",
+        tensor=tensor,
+    )
+
+
 def apply_dot_requirements(lowering: AtenLowering, node: Node) -> Lowering:
     """Apply min_dot_size requirements to the config_spec"""
     assert not node.kwargs, "dot kwargs not supported"
@@ -877,6 +939,55 @@ baddbmm_lowering = register_lowering(
 def codegen_baddbmm(ctx: LoweringContext, node: Node) -> ast.AST:
     assert not node.kwargs, "baddbmm kwargs not supported"
     return reduce_3d_dot(ctx, node, True)
+
+
+def _openmp_dot(ctx: LoweringContext, node: Node, with_acc: bool) -> ast.AST:
+    """Generate torch.mm / torch.addmm / torch.bmm / torch.baddbmm for OpenMP.
+
+    Dispatches to PyTorch's CPU BLAS implementation.  For addmm/baddbmm,
+    casts operands to the accumulator dtype since CPU BLAS requires
+    matching dtypes (unlike GPU which handles mixed-precision natively).
+    """
+    args = [_env_arg(ctx, a) for a in map_arg(node.args, lambda a: a)]
+    if with_acc:
+        # CPU BLAS requires all three arguments to share a dtype.
+        # The accumulator (args[0]) may be float32 while inputs are float16/bf16.
+        # Cast inputs to match the accumulator.
+        acc_dtype = node.args[0].meta["val"].dtype  # type: ignore[union-attr]
+        a_dtype = node.args[1].meta["val"].dtype  # type: ignore[union-attr]
+        a_ast, b_ast = args[1], args[2]
+        if a_dtype != acc_dtype:
+            a_ast = expr_from_string(f"{{a}}.to({acc_dtype})", a=a_ast)
+            b_ast = expr_from_string(f"{{b}}.to({acc_dtype})", b=b_ast)
+        if node.target == torch.ops.aten.baddbmm.default:
+            return expr_from_string(
+                "torch.baddbmm({acc}, {a}, {b})",
+                acc=args[0],
+                a=a_ast,
+                b=b_ast,
+            )
+        return expr_from_string(
+            "torch.addmm({acc}, {a}, {b})", acc=args[0], a=a_ast, b=b_ast
+        )
+    if node.target == torch.ops.aten.bmm.default:
+        return expr_from_string("torch.bmm({a}, {b})", a=args[0], b=args[1])
+    return expr_from_string("torch.mm({a}, {b})", a=args[0], b=args[1])
+
+
+@bmm_lowering.register_codegen("openmp")
+@mm_lowering.register_codegen("openmp")
+def codegen_openmp_mm(ctx: LoweringContext, node: Node) -> ast.AST:
+    return _openmp_dot(ctx, node, False)
+
+
+@addmm_lowering.register_codegen("openmp")
+def codegen_openmp_addmm(ctx: LoweringContext, node: Node) -> ast.AST:
+    return _openmp_dot(ctx, node, True)
+
+
+@baddbmm_lowering.register_codegen("openmp")
+def codegen_openmp_baddbmm(ctx: LoweringContext, node: Node) -> ast.AST:
+    return _openmp_dot(ctx, node, True)
 
 
 def _pallas_dot(ctx: LoweringContext, node: Node, with_acc: bool) -> ast.AST:

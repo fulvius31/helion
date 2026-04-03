@@ -393,6 +393,41 @@ class FlatProgramIDs(ProgramIDs):
         return expr_from_string(f"({self.total_pids_expr(is_device=False)},)")
 
 
+class ForLoopProgramIDs(FlatProgramIDs):
+    """CPU: iterate over tiles with a Python for-loop instead of GPU grid.
+
+    Uses setup_persistent_kernel() to wrap the completed body in a for-loop
+    after codegen, same pattern as PersistentProgramIDs.
+    The loop variable is used directly as the flat PID for decomposition.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        device_function = DeviceFunction.current()
+        self._loop_var: str = device_function.new_var("_cpu_pid")
+
+    def codegen(self, state: CodegenState) -> None:
+        # Decompose the loop variable (not program_id) into per-dim PIDs
+        statements = self._decompose_pid_to_statements(self._loop_var, state)
+        state.codegen.statements_stack[-1][:] = [
+            *statements,
+            *state.codegen.statements_stack[-1],
+        ]
+
+    def codegen_grid(self) -> ast.AST:
+        return expr_from_string("(1,)")
+
+    def setup_persistent_kernel(
+        self, device_function: DeviceFunction, total_pids_expr: str | None = None
+    ) -> list[ast.stmt] | None:
+        if total_pids_expr is None:
+            total_pids_expr = self.total_pids_expr(is_device=True)
+        range_expr = f"range({total_pids_expr})"
+        return self._setup_persistent_kernel_and_wrap_body(
+            device_function, self._loop_var, range_expr, total_pids_expr
+        )
+
+
 class CuteProgramIDs(FlatProgramIDs):
     """Flat PID strategy for CuTe pointwise kernels."""
 
