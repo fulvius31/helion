@@ -458,6 +458,39 @@ def cute_matmul_mma(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return out
 
 
+@helion.kernel(backend="cute", static_shapes=True)
+def cute_matmul_mma_fp8(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    # fp8 (e4m3) inputs, f32 accumulate, bf16 output -- the tcgen05 MMA atom
+    # for fp8 is MmaF8F6F4Op (MMA-K=32 vs 16 for bf16/fp16).
+    m, k = x.size()
+    _, n = y.size()
+    out = torch.empty([m, n], dtype=torch.bfloat16, device=x.device)
+    for tile_m, tile_n in hl.tile([m, n]):
+        acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)
+        for tile_k in hl.tile(k):
+            acc = hl.dot(x[tile_m, tile_k], y[tile_k, tile_n], acc=acc)
+        out[tile_m, tile_n] = acc.to(torch.bfloat16)
+    return out
+
+
+@helion.kernel(backend="cute", static_shapes=True)
+def cute_matmul_mma_fp8_rowvec_scale(
+    x: torch.Tensor, y: torch.Tensor, scale_n: torch.Tensor
+) -> torch.Tensor:
+    # fp8 GEMM with a fused per-column (rowvec) scale in the epilogue.
+    # Exercises the rowvec aux chain on the tcgen05 fp8 path (and, for
+    # TMA-store configs, the register-hoist of the rowvec load).
+    m, k = x.size()
+    _, n = y.size()
+    out = torch.empty([m, n], dtype=torch.bfloat16, device=x.device)
+    for tile_m, tile_n in hl.tile([m, n]):
+        acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)
+        for tile_k in hl.tile(k):
+            acc = hl.dot(x[tile_m, tile_k], y[tile_k, tile_n], acc=acc)
+        out[tile_m, tile_n] = (acc * scale_n[tile_n]).to(torch.bfloat16)
+    return out
+
+
 @helion.kernel(backend="cute")
 def cute_matmul_mma_epilogue(
     x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor
@@ -1194,6 +1227,147 @@ class TestCuteBackend(TestCase):
             code,
         )
         self.assertIn("cutlass.pipeline.NamedBarrier(barrier_id=1", code)
+
+    def test_matmul_mma_tcgen05_fp8(self) -> None:
+        support = get_cute_mma_support()
+        if not support.tcgen05_f8:
+            self.skipTest("tcgen05 FP8 MMA is not supported on this machine")
+
+        torch.manual_seed(0)
+        x = (torch.randn(256, 128, device=DEVICE) * 0.4).to(torch.float8_e4m3fn)
+        y = (torch.randn(128, 128, device=DEVICE) * 0.4).to(torch.float8_e4m3fn)
+        code, out = code_and_output(
+            cute_matmul_mma_fp8, (x, y), block_sizes=[128, 128, 128]
+        )
+        ref = x.float() @ y.float()
+        torch.testing.assert_close(out.float(), ref, atol=1.0, rtol=1e-1)
+        # fp8 routes through the tcgen05 F8F6F4 MMA atom (MMA-K=32).
+        self.assertIn("cutlass.utils.blackwell_helpers.make_trivial_tiled_mma", code)
+        self.assertIn("cutlass.Float8E4M3FN", code)
+        self.assertIn("cute.nvgpu.tcgen05", code)
+        self.assertIn("cute.gemm(", code)
+
+    def test_matmul_mma_tcgen05_fp8_col_major_b(self) -> None:
+        support = get_cute_mma_support()
+        if not support.tcgen05_f8:
+            self.skipTest("tcgen05 FP8 MMA is not supported on this machine")
+
+        torch.manual_seed(0)
+        x = (torch.randn(256, 128, device=DEVICE) * 0.4).to(torch.float8_e4m3fn)
+        # Column-major (K-contiguous) B. Helion must emit a K-major B operand
+        # (OperandMajorMode.K for B) and a matching K-major B SMEM layout,
+        # rather than forcing the slow non-TMA fallback.
+        y = (torch.randn(128, 128, device=DEVICE) * 0.4).to(torch.float8_e4m3fn)
+        y = y.T.contiguous().T
+        self.assertFalse(y.is_contiguous())
+        code, out = code_and_output(
+            cute_matmul_mma_fp8, (x, y), block_sizes=[128, 128, 128]
+        )
+        ref = x.float() @ y.float()
+        torch.testing.assert_close(out.float(), ref, atol=1.0, rtol=1e-1)
+        # B is emitted K-major: both A and B operand major modes are K, so
+        # OperandMajorMode.K appears at least twice (A + B); the MN-major B
+        # spelling must be absent.
+        self.assertIn("cutlass.Float8E4M3FN", code)
+        self.assertIn("cute.nvgpu.tcgen05", code)
+        self.assertGreaterEqual(code.count("cute.nvgpu.OperandMajorMode.K"), 2)
+        self.assertNotIn("cute.nvgpu.OperandMajorMode.MN", code)
+
+    def test_matmul_mma_tcgen05_fp8_rowvec_scale(self) -> None:
+        support = get_cute_mma_support()
+        if not support.tcgen05_f8:
+            self.skipTest("tcgen05 FP8 MMA is not supported on this machine")
+
+        torch.manual_seed(0)
+        x = (torch.randn(256, 128, device=DEVICE) * 0.4).to(torch.float8_e4m3fn)
+        y = (torch.randn(128, 128, device=DEVICE) * 0.4).to(torch.float8_e4m3fn)
+        scale_n = torch.rand(128, device=DEVICE) + 0.5
+        code, out = code_and_output(
+            cute_matmul_mma_fp8_rowvec_scale,
+            (x, y, scale_n),
+            block_sizes=[128, 128, 128],
+        )
+        ref = (x.float() @ y.float()) * scale_n.float()
+        torch.testing.assert_close(out.float(), ref, atol=1.0, rtol=1e-1)
+        self.assertIn("cutlass.Float8E4M3FN", code)
+        self.assertIn("cute.nvgpu.tcgen05", code)
+
+    def test_matmul_mma_tcgen05_fp8_cluster_m2_persistent(self) -> None:
+        """Test FP8 E4M3 with cluster_m=2 persistent scheduling."""
+        support = get_cute_mma_support()
+        if not support.tcgen05_f8:
+            self.skipTest("tcgen05 FP8 MMA is not supported on this machine")
+
+        torch.manual_seed(0)
+        x = (torch.randn(512, 2048, device=DEVICE) * 0.4).to(torch.float8_e4m3fn)
+        y = (torch.randn(2048, 2048, device=DEVICE) * 0.4).to(torch.float8_e4m3fn)
+
+        # Use block_m=256 to enable is_two_cta (required for cluster_m=2 role-local)
+        code, out = code_and_output(
+            cute_matmul_mma_fp8,
+            (x, y),
+            block_sizes=[256, 256, 64],
+            tcgen05_cluster_m=2,
+            pid_type="persistent_blocked",
+        )
+        ref = x.float() @ y.float()
+        torch.testing.assert_close(out.float(), ref, atol=1.0, rtol=1e-1)
+
+        # Verify FP8 dtype, tcgen05 backend, cluster_m=2, and persistent scheduler
+        self.assertIn("cutlass.Float8E4M3FN", code)
+        self.assertIn("cute.nvgpu.tcgen05", code)
+        self.assertIn("(2, 1, 1)", code)  # cluster_m=2
+        self.assertIn("StaticPersistentTileScheduler", code)
+
+    def test_matmul_mma_tcgen05_fp8_deep_ab_staging_6(self) -> None:
+        """Test FP8 with ab_stages=6 (mid-depth staging)."""
+        support = get_cute_mma_support()
+        if not support.tcgen05_f8:
+            self.skipTest("tcgen05 FP8 MMA is not supported on this machine")
+
+        torch.manual_seed(0)
+        x = (torch.randn(512, 1024, device=DEVICE) * 0.4).to(torch.float8_e4m3fn)
+        y = (torch.randn(1024, 1024, device=DEVICE) * 0.4).to(torch.float8_e4m3fn)
+        # cluster_m=2 requires a persistent pid_type; block_m=256 engages the
+        # validated two-CTA role-local path.
+        code, out = code_and_output(
+            cute_matmul_mma_fp8,
+            (x, y),
+            block_sizes=[256, 128, 64],
+            tcgen05_ab_stages=6,
+            tcgen05_cluster_m=2,
+            pid_type="persistent_blocked",
+        )
+        ref = x.float() @ y.float()
+        torch.testing.assert_close(out.float(), ref, atol=1.0, rtol=1e-1)
+        # Verify deep staging config is in generated code
+        self.assertIn("cutlass.Float8E4M3FN", code)
+        self.assertIn("cute.nvgpu.tcgen05", code)
+
+    def test_matmul_mma_tcgen05_fp8_deep_ab_staging_8(self) -> None:
+        """Test FP8 with ab_stages=8 (sweet spot from benchmarks)."""
+        support = get_cute_mma_support()
+        if not support.tcgen05_f8:
+            self.skipTest("tcgen05 FP8 MMA is not supported on this machine")
+
+        torch.manual_seed(0)
+        x = (torch.randn(256, 1024, device=DEVICE) * 0.4).to(torch.float8_e4m3fn)
+        y = (torch.randn(1024, 1024, device=DEVICE) * 0.4).to(torch.float8_e4m3fn)
+        # cluster_m=2 requires a persistent pid_type; block_m=256 engages the
+        # validated two-CTA role-local path.
+        code, out = code_and_output(
+            cute_matmul_mma_fp8,
+            (x, y),
+            block_sizes=[256, 128, 64],
+            tcgen05_ab_stages=8,
+            tcgen05_cluster_m=2,
+            pid_type="persistent_blocked",
+        )
+        ref = x.float() @ y.float()
+        torch.testing.assert_close(out.float(), ref, atol=1.0, rtol=1e-1)
+        # Verify deep staging is used
+        self.assertIn("cutlass.Float8E4M3FN", code)
+        self.assertIn("cute.nvgpu.tcgen05", code)
 
     def test_matmul_dot_out_dtype_falls_back_from_mma(self) -> None:
         args = (

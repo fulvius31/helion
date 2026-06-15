@@ -955,6 +955,22 @@ class TritonBackend(Backend):
     def experimental(self) -> bool:
         return False
 
+    def transform_host_arg(
+        self,
+        arg: Argument,
+        host_str: str,
+        tensor_host_args: list[str],
+    ) -> str:
+        from .device_function import TensorArg
+
+        # Bind fp4x2 storage as uint8; Triton has no pointer type for the shell dtype.
+        if (
+            isinstance(arg, TensorArg)
+            and arg.fake_value.dtype is torch.float4_e2m1fn_x2
+        ):
+            return f"{host_str}.view(torch.uint8)"
+        return host_str
+
     def supports_config_key(self, key: str) -> bool:
         if key == "load_cache_modifiers":
             return True
@@ -1245,9 +1261,9 @@ class TritonBackend(Backend):
         return f"triton.cdiv({numel}, {block_size})"
 
     def inductor_op_overrides(self) -> InductorOpOverrides:
-        from torch._inductor.codegen.triton import TritonOverrides
+        from .triton.overrides import HelionTritonOverrides
 
-        return TritonOverrides()
+        return HelionTritonOverrides()
 
     def grid_index_expr(
         self, offset_var: str, block_size_var: str, dtype: str, *, axis: int
@@ -1927,13 +1943,13 @@ class PallasBackend(Backend):
             if bid not in analyzer.required_alignments:
                 continue
             requirement_alignment = analyzer.required_alignments[bid]
-            # When the tensor dim is smaller than the alignment, any
-            # block_size >= tensor_dim will be capped to tensor_dim at
-            # runtime (full-dim access, always valid).  Use the
-            # tensor dim as the minimum so smaller but still-valid
-            # block sizes are not unnecessarily excluded.
             dim_size = next_power_of_2(max(spec.size_hint, 1))
-
+            # Cap the alignment requirement by the tensor lane dim: when
+            # the dim is smaller than the requirement, the full-dim access
+            # is always aligned at offset 0 so block_size = dim_size is
+            # safe.  When the dim is at least as big as the requirement,
+            # ``min`` returns ``requirement_alignment`` and the strict
+            # floor still applies (used by aot_example.sum_aot, n=256).
             spec.update_min(min(requirement_alignment, dim_size))
 
         # Propagate alignment minimums from inner tiles to their bounding outer tiles.
